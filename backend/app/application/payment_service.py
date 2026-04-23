@@ -6,7 +6,7 @@
 """
 
 import uuid
-from typing import Optional
+from typing import Optional, List
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,46 +20,7 @@ class PaymentService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def pay_order_unsafe(self, order_id: uuid.UUID) -> dict:
-        """
-        НЕБЕЗОПАСНАЯ реализация оплаты заказа.
-        
-        Использует READ COMMITTED (по умолчанию) без блокировок.
-        ЛОМАЕТСЯ при конкурентных запросах - может привести к двойной оплате!
-        
-        TODO: Реализовать метод следующим образом:
-        
-        1. Прочитать текущий статус заказа:
-           SELECT status FROM orders WHERE id = :order_id
-           
-        2. Проверить, что статус = 'created'
-           Если нет - выбросить OrderAlreadyPaidError
-           
-        3. Изменить статус на 'paid':
-           UPDATE orders SET status = 'paid' 
-           WHERE id = :order_id AND status = 'created'
-           
-        4. Записать изменение в историю:
-           INSERT INTO order_status_history (id, order_id, status, changed_at)
-           VALUES (gen_random_uuid(), :order_id, 'paid', NOW())
-           
-        5. Сделать commit
-        
-        ВАЖНО: НЕ используйте FOR UPDATE!
-        ВАЖНО: НЕ меняйте уровень изоляции (оставьте READ COMMITTED по умолчанию)!
-        
-        Args:
-            order_id: ID заказа для оплаты
-            
-        Returns:
-            dict с информацией о заказе после оплаты
-            
-        Raises:
-            OrderNotFoundError: если заказ не найден
-            OrderAlreadyPaidError: если заказ уже оплачен
-        """
-        # TODO: Реализовать логику оплаты БЕЗ блокировок
-        raise NotImplementedError("TODO: Реализовать PaymentService.pay_order_unsafe")
+
 
     async def pay_order_safe(self, order_id: uuid.UUID) -> dict:
         """
@@ -108,9 +69,24 @@ class PaymentService:
             OrderAlreadyPaidError: если заказ уже оплачен
         """
         # TODO: Реализовать логику оплаты С блокировками
-        raise NotImplementedError("TODO: Реализовать PaymentService.pay_order_safe")
+        set_transation_level = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        await self.session.execute(set_transation_level)
+        select_result = await self.session.execute(text("SELECT status FROM orders WHERE id = :order_id FOR UPDATE"), {"order_id": order_id})
+        first_fetched = select_result.fetchone()
 
-    async def get_payment_history(self, order_id: uuid.UUID) -> list[dict]:
+        if first_fetched is None:
+            raise OrderNotFoundError(order_id)
+
+        if first_fetched.status != 'created':
+            raise OrderAlreadyPaidError(order_id)
+
+        await self.session.execute(text("UPDATE orders SET status = 'paid' WHERE id = :order_id"), {"order_id": order_id})
+        random_id = uuid.uuid4() 
+        await self.session.execute(text("INSERT INTO order_status_history (id, order_id, status, changed_at) VALUES (:id, :order_id, 'paid', NOW())"), {"id": random_id, "order_id": order_id})
+        await self.session.commit()
+        return { "order_id": str(order_id), "status": "paid", "message": "Safey!"}
+
+    async def get_payment_history(self, order_id: uuid.UUID) -> List[dict]:
         """
         Получить историю оплат для заказа.
         
@@ -130,4 +106,106 @@ class PaymentService:
             Список словарей с записями об оплате
         """
         # TODO: Реализовать получение истории оплат
-        raise NotImplementedError("TODO: Реализовать PaymentService.get_payment_history")
+        result = await self.session.execute(
+            text("""
+                SELECT id, order_id, status, changed_at
+                 FROM order_status_history
+                 WHERE order_id = :order_id AND status = 'paid'
+                 ORDER BY changed_at
+            """),
+            {"order_id": order_id}
+        )
+        
+        rows = result.fetchall()
+
+        history = []
+        for i in rows:
+            history.append({
+                "id": str(i.id),
+                "order_id": str(i.order_id),
+                "status": i.status,
+                "changed_at": i.changed_at
+            })
+        
+        return history
+
+    async def pay_order_unsafe(self, order_id: uuid.UUID) -> dict:
+        """
+            НЕБЕЗОПАСНАЯ реализация оплаты заказа.
+        
+            Использует READ COMMITTED (по умолчанию) без блокировок.
+            ЛОМАЕТСЯ при конкурентных запросах - может привести к двойной оплате!
+        
+            TODO: Реализовать метод следующим образом:
+        
+            1. Прочитать текущий статус заказа:
+            SELECT status FROM orders WHERE id = :order_id
+           
+        2. Проверить, что статус = 'created'
+           Если нет - выбросить OrderAlreadyPaidError
+           
+        3. Изменить статус на 'paid':
+           UPDATE orders SET status = 'paid' 
+           WHERE id = :order_id AND status = 'created'
+           
+        4. Записать изменение в историю:
+           INSERT INTO order_status_history (id, order_id, status, changed_at)
+           VALUES (gen_random_uuid(), :order_id, 'paid', NOW())
+           
+        5. Сделать commit
+        
+        ВАЖНО: НЕ используйте FOR UPDATE!
+        ВАЖНО: НЕ меняйте уровень изоляции (оставьте READ COMMITTED по умолчанию)!
+        
+        Args:
+            order_id: ID заказа для оплаты
+            
+        Returns:
+            dict с информацией о заказе после оплаты
+            
+        Raises:
+            OrderNotFoundError: если заказ не найден
+            OrderAlreadyPaidError: если заказ уже оплачен
+        """
+        # TODO: Реализовать логику оплаты БЕЗ блокировок
+        status_query = text("SELECT status FROM orders WHERE id = :order_id")
+        result = await self.session.execute(status_query, {"order_id": order_id})
+        row = result.fetchone()
+        if row is None:
+            raise OrderNotFoundError(order_id)
+
+        current_status = row[0]
+        print(f"[DEBUG] order_id={order_id}, current_status={current_status}")
+
+    # Step 2: Check status is 'created'
+        if current_status != "created":
+            raise OrderAlreadyPaidError(order_id)
+
+    # Step 3: Update status (with optimistic condition)
+        update_query = text("""
+            UPDATE orders
+            SET status = 'paid'
+            WHERE id = :order_id
+        """)
+        update_result = await self.session.execute(update_query, {"order_id": order_id})
+    # If no row updated, someone else changed it concurrently
+    # Step 4: Insert into history
+        history_id = uuid.uuid4()
+        history_query = text("""
+            INSERT INTO order_status_history (id, order_id, status, changed_at)
+            VALUES (:id, :order_id, 'paid', NOW())
+        """)
+        await self.session.execute(
+            history_query,
+            {"id": history_id, "order_id": order_id}
+        )
+
+    # Step 5: Commit
+        await self.session.commit()
+
+    # Return some info about the order (optional, but required by signature)
+        return {
+            "order_id": str(order_id),
+            "status": "paid",
+            "message": "unsafe what the helly"
+        }

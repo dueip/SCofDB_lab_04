@@ -14,6 +14,11 @@ class InvalidEmailError(DomainException):
         self.email = email
         super().__init__(f"Invalid email format: {email}")
 
+class InvalidNameError(DomainException):
+    def __init__(self, email: str):
+        self.email = email
+        super().__init__(f"Invalid name format: {email}")
+
 
 class OrderAlreadyPaidError(DomainException):
     """Raised when attempting to pay an already paid order."""
@@ -46,6 +51,23 @@ class InvalidPriceError(DomainException):
         self.price = price
         super().__init__(f"Price cannot be negative, got: {price}")
 
+class OrderAlreadyShipped(ValueError):
+    def __init__(self):
+        super().__init__(f"Order has been shipped")
+
+class OrderAlreadyCompleted(ValueError):
+    def __init__(self):
+        super().__init__(f"Order has been completed")
+
+class OrderNotYetPaid(ValueError):
+    def __init__(self):
+        super().__init__(f"Order has to be paid")
+
+class OrderNotYetShipped(ValueError):
+    def __init__(self):
+        super().__init__(f"Order has to be shipped")
+
+        
 
 class InvalidAmountError(DomainException):
     """Raised when amount is negative."""

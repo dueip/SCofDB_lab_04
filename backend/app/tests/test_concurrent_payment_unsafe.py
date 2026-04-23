@@ -8,8 +8,9 @@ pay_order_unsafe() возникает двойная оплата.
 import asyncio
 import pytest
 import uuid
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, AsyncEngine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 
 from app.application.payment_service import PaymentService
 
@@ -31,8 +32,10 @@ async def db_session():
     5. Закрыть сессию после теста
     """
     # TODO: Реализовать создание сессии
-    raise NotImplementedError("TODO: Реализовать db_session fixture")
-
+    engine: AsyncEngine = create_async_engine(DATABASE_URL, echo=False)
+    async_session: AsyncSession = AsyncSession(engine)
+    async with async_session as session:
+        yield session 
 
 @pytest.fixture
 async def test_order(db_session):
@@ -47,8 +50,34 @@ async def test_order(db_session):
     5. После теста - очистить данные
     """
     # TODO: Реализовать создание тестового заказа
-    raise NotImplementedError("TODO: Реализовать test_order fixture")
 
+    user_id= uuid.uuid4()
+    user_query = text("""
+        INSERT INTO users (id, email, name, created_at)
+        VALUES (:id, 'meow@meow.meow', 'Meow User', NOW())
+""")
+    await db_session.execute(user_query, {"id": user_id})
+    order_id = uuid.uuid4()
+    order_query = text("""
+        INSERT INTO orders (id, user_id, created_at, status, total_amount)
+        VALUES (:id, :user_id, NOW(), 'created', 1000)
+""")
+    await db_session.execute(order_query, {"id": order_id, "user_id": user_id})
+    
+    what_query = text("""
+        INSERT INTO order_status_history (id, order_id, status, changed_at)
+        VALUES (:id, :order_id, 'created', NOW())
+    """)
+    await db_session.execute(what_query, {"id": uuid.uuid4(), "order_id": order_id})
+
+    await db_session.commit()
+
+    yield order_id
+
+    await db_session.execute(text("DELETE FROM order_status_history WHERE order_id = :order_id"), {"order_id": order_id})
+    await db_session.execute(text("DELETE FROM orders WHERE id = :id"), {"id": order_id})
+    await db_session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+    await db_session.commit()
 
 @pytest.mark.asyncio
 async def test_concurrent_payment_unsafe_demonstrates_race_condition(db_session, test_order):
@@ -94,12 +123,40 @@ async def test_concurrent_payment_unsafe_demonstrates_race_condition(db_session,
        for record in history:
            print(f"  - {record['changed_at']}: status = {record['status']}")
     """
-    # TODO: Реализовать тест, демонстрирующий race condition
-    raise NotImplementedError("TODO: Реализовать test_concurrent_payment_unsafe")
+    order_id = test_order
+
+    engine = create_async_engine(DATABASE_URL, echo=False)
+
+    async def payment_attempt_1():
+        async with AsyncSession(engine) as session1:
+            service1 = PaymentService(session1)
+            return await service1.pay_order_unsafe(order_id)
+
+    async def payment_attempt_2():
+        async with AsyncSession(engine) as session2:
+            service2 = PaymentService(session2)
+            return await service2.pay_order_unsafe(order_id)
+
+    results = await asyncio.gather(
+        payment_attempt_1(),
+        payment_attempt_2(),
+        return_exceptions=True
+    )
+
+    service = PaymentService(db_session)
+    history = await service.get_payment_history(order_id)
+    assert len(history) == 2, "Ожидалось 2 записи об оплате (RACE CONDITION!)"
+
+    print(f"⚠️ RACE CONDITION DETECTED!")
+    print(f"Order {order_id} was paid TWICE:")
+    for record in history:
+        print(f"  - {record['changed_at']}: status = {record['status']}")
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_payment_unsafe_both_succeed():
+async def test_concurrent_payment_unsafe_both_succeed(db_session, test_order):
     """
     Дополнительный тест: проверить, что ОБЕ транзакции успешно завершились.
     
@@ -111,8 +168,36 @@ async def test_concurrent_payment_unsafe_both_succeed():
     Это подтверждает, что проблема не в ошибках, а в race condition.
     """
     # TODO: Реализовать проверку успешности обеих транзакций
-    raise NotImplementedError("TODO: Реализовать test_concurrent_payment_unsafe_both_succeed")
+    order_id = test_order
 
+    engine = create_async_engine(DATABASE_URL, echo=False)
+
+    async def payment_attempt_1():
+        async with AsyncSession(engine) as session1:
+            service1 = PaymentService(session1)
+            return await service1.pay_order_unsafe(order_id)
+
+    async def payment_attempt_2():
+        async with AsyncSession(engine) as session2:
+            service2 = PaymentService(session2)
+            return await service2.pay_order_unsafe(order_id)
+
+    results = await asyncio.gather(
+        payment_attempt_1(),
+        payment_attempt_2(),
+        return_exceptions=True
+    )
+
+    exceptions = [r for r in results if isinstance(r, Exception)]
+    assert len(exceptions) == 0, f"Ожидалось 0 исключений, получено: {exceptions}"
+
+    service = PaymentService(db_session)
+    history = await service.get_payment_history(order_id)
+    assert len(history) == 2, f"Обе транзакции Записали в историю. Записей: {len(history)}"
+
+    print("Обе транзакции сработали.")
+
+    await engine.dispose()
 
 if __name__ == "__main__":
     """
